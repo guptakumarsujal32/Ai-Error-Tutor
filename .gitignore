@@ -1,0 +1,33 @@
+# Secrets & Local Environment
+.env
+.env.*
+!.env.example
+
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE & OS Files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Sustainability & Security Scans
+.security_scans/
+emissions.csv*
+
+# Large Model Weights (> 100MB exceeds GitHub push limit)
+*.safetensors
+*.bin
+models/**/*.safetensors
+models/**/*.bin
