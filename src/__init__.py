@@ -8,10 +8,10 @@ cryptic compiler messages into human-friendly explanations.
 from .error_capture import ErrorCapture, capture_error
 from .ast_parser import ASTContextExtractor
 from .fallback import FallbackExplainer
-from .gemini_client import GeminiErrorExplainer
 from .pipeline import AIErrorTutor, ExplanationResult
+from llm.ollama_client import OllamaClient
 from .security import CodeSecurityValidator, SecurityWarning
-from .aai_security_guard import AAISecurityGuard, SecurityAssessment, ThreatCategory, RiskLevel
+from .aai_security_guard import AAISecurityGuard, ThreatCategory, RiskLevel
 from .multi_agent_system import (
     CompilerOrchestratorAgent,
     CompilerPhase,
@@ -24,8 +24,6 @@ from .multi_agent_system import (
     SelfHealingVerifierAgent
 )
 
-ErrorExplainerModel = GeminiErrorExplainer
-
 __version__ = "1.0.0"
 __author__ = "Sai Charan Kumar"
 
@@ -37,9 +35,8 @@ __all__ = [
     # AST Parser
     "ASTContextExtractor",
 
-    # Model
-    "ErrorExplainerModel",
-    "GeminiErrorExplainer",
+    # Model / Engine
+    "OllamaClient",
     "FallbackExplainer",
 
     # Pipeline

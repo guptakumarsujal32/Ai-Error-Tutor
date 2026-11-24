@@ -22,7 +22,6 @@ from typing import Dict, List, Optional, Tuple, Any
 try:
     from .error_capture import ErrorCapture
     from .ast_parser import ASTContextExtractor
-    from .gemini_client import GeminiErrorExplainer
     from .fallback import FallbackExplainer
     from .code_analyzer import CodeHealthAnalyzer, CodeHealthReport
     from .security import SecurityWarning
@@ -30,7 +29,6 @@ try:
 except ImportError:
     from error_capture import ErrorCapture
     from ast_parser import ASTContextExtractor
-    from gemini_client import GeminiErrorExplainer
     from fallback import FallbackExplainer
     try:
         from code_analyzer import CodeHealthAnalyzer, CodeHealthReport
@@ -440,7 +438,7 @@ class SelfHealingVerifierAgent(BaseCompilerAgent):
         candidate_code: str,
         original_code: str,
         orchestrator: Any,
-        max_attempts: int = 3
+        max_attempts: int = 50
     ) -> Tuple[Optional[str], bool, int]:
         """
         Closed-loop self-correction:

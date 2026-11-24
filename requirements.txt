@@ -1,15 +1,14 @@
-# App and UI
+# App and IDE UI
 streamlit>=1.32.0
-pandas>=2.0.0
+streamlit-ace>=0.1.1
 
-# AI and Neural Models
-google-genai>=1.0.0
-torch>=2.0.0
-transformers>=4.30.0
+# Tier 1: Gemini Cloud LLM SDK
+google-genai>=2.3.0
+
+# Tier 2: Local LLM Client (Ollama)
+requests>=2.31.0
 
 # Code Quality, Security, and Sustainability
 bandit>=1.7.9
 codecarbon>=2.3.0
 python-dotenv>=1.0.0
-requests>=2.31.0
-

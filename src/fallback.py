@@ -15,7 +15,7 @@ class FallbackExplainer:
         'AttributeError': "You're trying to use a method or property that doesn't exist for this type of object. Check the object type and available methods.",
         'IndentationError': "Your code indentation is inconsistent. Use 4 spaces for each indentation level and make sure all lines in the same block match.",
         'SecurityError': "Your code was blocked because it contains potentially dangerous operations that are not allowed in a learning environment.",
-        'TimeoutError': "Your code took too long to execute and was stopped. This usually happens because of an infinite loop (e.g. while condition never becomes False) or endless recursion.",
+        'TimeoutError': "Your code took too long to execute and was stopped by the sandbox watchdog timer. This usually happens because of an infinite loop (e.g. while condition never becomes False) or endless recursion.",
     }
 
     def explain(self, error_type: str, error_message: str) -> str:

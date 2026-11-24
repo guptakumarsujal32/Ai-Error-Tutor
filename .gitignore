@@ -31,3 +31,9 @@ emissions.csv*
 *.bin
 models/**/*.safetensors
 models/**/*.bin
+
+# Logs & Temporary Artifacts
+logs/
+*.log
+*.zip
+AI_Error_Tutor_Final_Report.docx

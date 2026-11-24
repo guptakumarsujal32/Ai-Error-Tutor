@@ -1,0 +1,625 @@
+/* ─────────────────────────────────────────────────────────────
+   CodeChef-Style Online Compiler / IDE Theme for AI Error Tutor
+   ───────────────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+/* Streamlit Chrome Hiding & Full-Width Tight Spacing */
+header[data-testid="stHeader"] {
+    display: none !important;
+}
+footer {
+    display: none !important;
+}
+[data-testid="stToolbar"] {
+    display: none !important;
+}
+#MainMenu {
+    visibility: hidden !important;
+}
+.stDeployButton {
+    display: none !important;
+}
+
+/* Base Container Spacing */
+.block-container {
+    padding-top: 0.25rem !important;
+    padding-bottom: 2rem !important;
+    padding-left: 1.2rem !important;
+    padding-right: 1.2rem !important;
+    max-width: 100% !important;
+}
+
+/* Typography Defaults */
+html, body, [data-testid="stAppViewContainer"], .stApp {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    -webkit-font-smoothing: antialiased;
+}
+
+code, pre, .mono-font, .stTextArea textarea {
+    font-family: 'JetBrains Mono', Consolas, 'Courier New', monospace !important;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Top Navigation Bar (CodeChef Slim Dark Header)
+   ───────────────────────────────────────────────────────────── */
+.codechef-topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: #181818;
+    border: 1px solid #2d2d2d;
+    border-radius: 8px;
+    padding: 8px 16px;
+    margin-bottom: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.topbar-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 17px;
+    font-weight: 800;
+    color: #f5f5f5;
+    letter-spacing: -0.3px;
+}
+
+.brand-badge {
+    background: linear-gradient(135deg, #2ecc71 0%, #27ae60 100%);
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 2px 7px;
+    border-radius: 4px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+.topbar-center {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.topbar-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Badges: CO2 & Rate Limit */
+.telemetry-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: 11.5px;
+    font-weight: 600;
+    font-family: 'JetBrains Mono', monospace;
+    transition: all 0.2s ease;
+}
+
+.co2-badge {
+    background: rgba(46, 204, 113, 0.12);
+    border: 1px solid rgba(46, 204, 113, 0.35);
+    color: #2ecc71;
+}
+
+.rate-badge-normal {
+    background: rgba(52, 152, 219, 0.12);
+    border: 1px solid rgba(52, 152, 219, 0.35);
+    color: #3498db;
+}
+
+.rate-badge-warning {
+    background: rgba(243, 156, 18, 0.15);
+    border: 1px solid rgba(243, 156, 18, 0.4);
+    color: #f39c12;
+}
+
+.rate-badge-blocked {
+    background: rgba(231, 76, 60, 0.2);
+    border: 1px solid rgba(231, 76, 60, 0.5);
+    color: #e74c3c;
+    animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.6; }
+    100% { opacity: 1; }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   IDE Action Buttons (Run & Submit / Analyze)
+   ───────────────────────────────────────────────────────────── */
+button[kind="primary"] {
+    background: linear-gradient(180deg, #2ecc71 0%, #27ae60 100%) !important;
+    border: 1px solid #27ae60 !important;
+    color: #ffffff !important;
+    font-weight: 700 !important;
+    font-size: 13.5px !important;
+    border-radius: 6px !important;
+    padding: 6px 18px !important;
+    box-shadow: 0 2px 6px rgba(46, 204, 113, 0.3) !important;
+    transition: all 0.15s ease !important;
+}
+
+button[kind="primary"]:hover {
+    background: linear-gradient(180deg, #32db79 0%, #2ecc71 100%) !important;
+    box-shadow: 0 4px 12px rgba(46, 204, 113, 0.45) !important;
+    transform: translateY(-1px) !important;
+}
+
+button[kind="primary"]:active {
+    transform: translateY(0px) !important;
+}
+
+button[kind="secondary"] {
+    background: #252526 !important;
+    border: 1px solid #3e3e42 !important;
+    color: #e0e0e0 !important;
+    font-weight: 600 !important;
+    font-size: 13px !important;
+    border-radius: 6px !important;
+    transition: all 0.15s ease !important;
+}
+
+button[kind="secondary"]:hover {
+    background: #2d2d30 !important;
+    border-color: #555555 !important;
+    color: #ffffff !important;
+    transform: translateY(-1px) !important;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Editor Pane & Tab Bar
+   ───────────────────────────────────────────────────────────── */
+.ide-panel-header {
+    background: #252526;
+    border: 1px solid #333333;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 8px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.ide-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: #e0e0e0;
+    background: #1e1e1e;
+    padding: 5px 12px;
+    border-radius: 5px 5px 0 0;
+    border-top: 2px solid #2ecc71;
+    border-left: 1px solid #333333;
+    border-right: 1px solid #333333;
+    margin-bottom: -9px;
+}
+
+.ide-stats {
+    font-size: 11px;
+    color: #8b949e;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.editor-wrapper {
+    border: 1px solid #333333;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 14px;
+}
+
+/* Error highlight banner on editor */
+.editor-error-flag {
+    background: rgba(231, 76, 60, 0.15);
+    border-left: 4px solid #e74c3c;
+    border-bottom: 1px solid rgba(231, 76, 60, 0.3);
+    padding: 6px 14px;
+    font-size: 12px;
+    color: #f85149;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Online Judge Terminal / Output Pane
+   ───────────────────────────────────────────────────────────── */
+.judge-header {
+    background: #252526;
+    border: 1px solid #333333;
+    border-bottom: none;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    padding: 8px 14px;
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #e0e0e0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.judge-telemetry-bar {
+    background: #1c1c1c;
+    border: 1px solid #333333;
+    border-bottom: none;
+    padding: 6px 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: #8b949e;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.judge-telemetry-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.judge-telemetry-item strong {
+    color: #f0f6fc;
+}
+
+/* Output Console Screen */
+.terminal-screen {
+    background: #0d1117;
+    border: 1px solid #333333;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+    padding: 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 160px;
+    max-height: 280px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-bottom: 14px;
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.4);
+}
+
+.terminal-success {
+    color: #2ecc71;
+    border-left: 4px solid #2ecc71;
+}
+
+.terminal-error {
+    color: #f85149;
+    border-left: 4px solid #f85149;
+}
+
+.terminal-timeout {
+    color: #f39c12;
+    border-left: 4px solid #f39c12;
+}
+
+.terminal-blocked {
+    color: #ff6b6b;
+    border-left: 4px solid #c0392b;
+}
+
+.terminal-idle {
+    color: #6e7681;
+    font-style: italic;
+}
+
+/* Judge Status Badges */
+.status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11.5px;
+    font-weight: 700;
+    padding: 3px 9px;
+    border-radius: 12px;
+    letter-spacing: 0.3px;
+}
+
+.status-success {
+    background: rgba(46, 204, 113, 0.15);
+    border: 1px solid rgba(46, 204, 113, 0.4);
+    color: #2ecc71;
+}
+
+.status-error {
+    background: rgba(231, 76, 60, 0.15);
+    border: 1px solid rgba(231, 76, 60, 0.4);
+    color: #f85149;
+}
+
+.status-timeout {
+    background: rgba(243, 156, 18, 0.15);
+    border: 1px solid rgba(243, 156, 18, 0.4);
+    color: #f39c12;
+}
+
+.status-blocked {
+    background: rgba(192, 57, 43, 0.2);
+    border: 1px solid rgba(192, 57, 43, 0.6);
+    color: #ff6b6b;
+}
+
+.status-idle {
+    background: rgba(110, 118, 129, 0.15);
+    border: 1px solid rgba(110, 118, 129, 0.3);
+    color: #8b949e;
+}
+
+/* Attack Blocked Big Banner */
+.attack-blocked-banner {
+    background: linear-gradient(135deg, rgba(192, 57, 43, 0.25) 0%, rgba(44, 12, 12, 0.5) 100%);
+    border: 1px solid #c0392b;
+    border-left: 5px solid #e74c3c;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    color: #ff8a80;
+}
+
+.attack-title {
+    font-size: 14px;
+    font-weight: 800;
+    color: #ff5252;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+
+/* Clean Run Successful Banner */
+.build-successful-banner {
+    background: linear-gradient(135deg, rgba(46, 204, 113, 0.15) 0%, rgba(16, 44, 25, 0.4) 100%);
+    border: 1px solid #2ecc71;
+    border-left: 5px solid #2ecc71;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 12px;
+    color: #a7f3d0;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Bottom Panel & Tab Styling
+   ───────────────────────────────────────────────────────────── */
+.bottom-panel-container {
+    background: #1e1e1e;
+    border: 1px solid #333333;
+    border-radius: 10px;
+    padding: 16px 20px;
+    margin-top: 10px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+/* Diagnostic Engine Source Tag */
+.engine-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 12px;
+    background: #252526;
+    border: 1px solid #3e3e42;
+    color: #e0e0e0;
+}
+
+.engine-cloud {
+    border-color: #3498db;
+    color: #58a6ff;
+    background: rgba(52, 152, 219, 0.1);
+}
+
+.engine-local {
+    border-color: #9b59b6;
+    color: #bc8cff;
+    background: rgba(155, 89, 182, 0.1);
+}
+
+.engine-rule {
+    border-color: #f39c12;
+    color: #f0883e;
+    background: rgba(243, 156, 18, 0.1);
+}
+
+/* Diagnostic Detail Cards */
+.diag-card {
+    background: #252526;
+    border: 1px solid #333333;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 12px;
+}
+
+.diag-title {
+    font-size: 13.5px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* AST Context Inspector Box */
+.ast-context-box {
+    background: #14181f;
+    border: 1px solid #232b38;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: #d1d5db;
+    margin-top: 8px;
+    margin-bottom: 12px;
+}
+
+.ast-row {
+    display: flex;
+    margin-bottom: 4px;
+}
+
+.ast-label {
+    min-width: 140px;
+    color: #8b949e;
+    font-weight: 600;
+}
+
+.ast-value {
+    color: #58a6ff;
+    word-break: break-all;
+}
+
+/* Typo suggestion pills */
+.typo-pill {
+    display: inline-block;
+    background: rgba(247, 120, 186, 0.12);
+    border: 1px solid rgba(247, 120, 186, 0.35);
+    color: #f778ba;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 6px;
+    margin-right: 6px;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Tutor Tab: Self-Healing Verification & Progressive Hints
+   ───────────────────────────────────────────────────────────── */
+.verify-box {
+    background: #252526;
+    border: 1px solid #333333;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 14px;
+}
+
+.verify-badge-success {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(46, 204, 113, 0.15);
+    border: 1px solid rgba(46, 204, 113, 0.4);
+    color: #2ecc71;
+    font-size: 11.5px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 12px;
+}
+
+.verify-badge-warning {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: rgba(243, 156, 18, 0.15);
+    border: 1px solid rgba(243, 156, 18, 0.4);
+    color: #f39c12;
+    font-size: 11.5px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 12px;
+}
+
+.socratic-question-box {
+    background: rgba(188, 140, 255, 0.08);
+    border: 1px solid rgba(188, 140, 255, 0.3);
+    border-left: 4px solid #bc8cff;
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 14px;
+    color: #f0f6fc;
+}
+
+.hint-step-card {
+    background: #252526;
+    border: 1px solid #333333;
+    border-left: 3px solid #3498db;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #e0e0e0;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Code Health Metric Cards
+   ───────────────────────────────────────────────────────────── */
+.health-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+@media (max-width: 900px) {
+    .health-metrics-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+.health-metric-card {
+    background: #252526;
+    border: 1px solid #333333;
+    border-radius: 8px;
+    padding: 14px 16px;
+    text-align: center;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.metric-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #8b949e;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+}
+
+.metric-value {
+    font-size: 22px;
+    font-weight: 800;
+    color: #ffffff;
+}
+
+.metric-sub {
+    font-size: 11.5px;
+    font-weight: 600;
+    margin-top: 4px;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Security Tab: Audit Trail Table
+   ───────────────────────────────────────────────────────────── */
+.audit-entry-card {
+    background: #20242b;
+    border: 1px solid #2d333b;
+    border-radius: 6px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+}
+
+.audit-header-line {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 4px;
+}
+

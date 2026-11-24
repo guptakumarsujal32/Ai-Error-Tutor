@@ -18,7 +18,7 @@ class ErrorCapture:
         self.security_validator = CodeSecurityValidator()
         self.timeout_seconds = timeout_seconds
 
-    def execute_code(self, code: str) -> Tuple[bool, Optional[Dict]]:
+    def execute_code(self, code: str, stdin_data: str = "") -> Tuple[bool, Optional[Dict]]:
         """
         Execute Python code inside an isolated subprocess and capture any errors.
 
@@ -34,12 +34,14 @@ class ErrorCapture:
         Returns:
             Tuple of (success: bool, error_info: dict or None)
         """
-        # Step -0.5: Enforce strict input size limits
-        MAX_INPUT_LENGTH = 10000
-        if len(code) > MAX_INPUT_LENGTH:
+        # Step -0.5: Enforce strict input size limits (5,000 lines / 500,000 chars)
+        MAX_INPUT_LINES = 5000
+        MAX_INPUT_LENGTH = 500000
+        line_count = len(code.splitlines())
+        if line_count > MAX_INPUT_LINES or len(code) > MAX_INPUT_LENGTH:
             error_info = {
                 'error_type': 'SecurityError',
-                'message': f"Code blocked: Input length ({len(code)} chars) exceeds maximum safety limit ({MAX_INPUT_LENGTH} chars).",
+                'message': f"Code blocked: Input size ({line_count} lines, {len(code)} chars) exceeds maximum safety limit ({MAX_INPUT_LINES} lines / {MAX_INPUT_LENGTH} chars).",
                 'line_number': 1,
                 'offset': None,
                 'code_context': code[:120],
@@ -49,7 +51,7 @@ class ErrorCapture:
                     SecurityWarning(
                         level='BLOCKED',
                         category='resource_dos',
-                        message=f"Input length exceeds {MAX_INPUT_LENGTH} character limit.",
+                        message=f"Input exceeds {MAX_INPUT_LINES} lines / {MAX_INPUT_LENGTH} character limit.",
                         line_number=1,
                         code_snippet=code[:60]
                     )
@@ -106,7 +108,17 @@ from io import StringIO
 # Cap recursion depth to prevent native C-stack exhaustion / segmentation faults
 sys.setrecursionlimit(500)
 
-code = sys.stdin.read(15000)
+payload_raw = sys.stdin.read(750000)
+try:
+    _payload = json.loads(payload_raw)
+    code = _payload.get('code', '')
+    user_stdin = _payload.get('stdin', '')
+except Exception:
+    code = payload_raw
+    user_stdin = ""
+
+old_stdin = sys.stdin
+sys.stdin = StringIO(user_stdin)
 old_stdout = sys.stdout
 old_stderr = sys.stderr
 sys.stdout = StringIO()
@@ -199,13 +211,18 @@ if len(out_str) > 50000:
 sys.stdout.write(out_str)
 """
 
+        payload = json.dumps({'code': code, 'stdin': stdin_data or ""})
+        has_heavy_import = any(
+            pkg in code for pkg in ("import pandas", "from pandas", "import numpy", "from numpy", "import scipy", "import matplotlib", "import sklearn")
+        )
+        exec_timeout = max(self.timeout_seconds, 6.0) if has_heavy_import else self.timeout_seconds
         try:
             proc = subprocess.run(
                 [sys.executable, "-c", runner_script],
-                input=code,
+                input=payload,
                 text=True,
                 capture_output=True,
-                timeout=self.timeout_seconds
+                timeout=exec_timeout
             )
 
             if proc.stdout.strip():
@@ -283,6 +300,354 @@ sys.stdout.write(out_str)
 
         self.last_error = error_info
         return success, error_info
+
+    def execute_resilient(
+        self,
+        code: str,
+        stdin_data: str = "",
+        total_timeout: Optional[float] = None,
+        per_stmt_timeout: Optional[float] = None,
+    ) -> Dict:
+        """
+        Pass 2 Resilient Dynamic Execution inside the isolated subprocess sandbox.
+
+        Transforms the module with AST so each top-level statement executes in its
+        own try/except block sharing a single namespace, collecting ALL runtime
+        exceptions in one run while detecting cascade errors and enforcing both
+        total and per-statement timeouts.
+        """
+        import config as _cfg
+        total_t = float(total_timeout if total_timeout is not None else getattr(_cfg, "TOTAL_SANDBOX_TIMEOUT", self.timeout_seconds))
+        stmt_t = float(per_stmt_timeout if per_stmt_timeout is not None else getattr(_cfg, "PER_STATEMENT_TIMEOUT", 0.6))
+
+        # Size limits (5,000 lines / 500,000 chars)
+        line_count = len(code.splitlines())
+        if line_count > 5000 or len(code) > 500000:
+            return {
+                "blocked": True,
+                "status": "Blocked",
+                "block_reason": f"Input size ({line_count} lines, {len(code)} chars) exceeds 5,000 lines / 500,000 chars.",
+                "stdout": "",
+                "stderr": "",
+                "issues": [],
+            }
+
+        # Security Gate validation BEFORE execution
+        is_safe, warnings = self.security_validator.validate(code)
+        if not is_safe:
+            blocked_msgs = [w.message for w in warnings if w.level == "BLOCKED"]
+            return {
+                "blocked": True,
+                "status": "Blocked",
+                "block_reason": "; ".join(blocked_msgs) or "Security policy violation.",
+                "stdout": "",
+                "stderr": "",
+                "issues": [],
+                "security_warnings": warnings,
+            }
+
+        resilient_runner = r"""
+import sys
+import ast
+import re
+import json
+import time
+import traceback
+from io import StringIO
+
+sys.setrecursionlimit(500)
+
+payload_raw = sys.stdin.read(750000)
+_payload = json.loads(payload_raw)
+code = _payload.get('code', '')
+user_stdin = _payload.get('stdin', '')
+total_timeout = float(_payload.get('total_timeout', 2.0))
+per_stmt_timeout = float(_payload.get('per_stmt_timeout', 0.6))
+code_lines = code.splitlines()
+
+old_stdin = sys.stdin
+old_stdout = sys.stdout
+old_stderr = sys.stderr
+buf_out = StringIO()
+buf_err = StringIO()
+sys.stdin = StringIO(user_stdin)
+sys.stdout = buf_out
+sys.stderr = buf_err
+
+raw_builtins = __builtins__
+safe_builtins = dict(raw_builtins.__dict__) if hasattr(raw_builtins, '__dict__') else dict(raw_builtins)
+
+BLOCKED_BUILTIN_NAMES = {
+    'open', 'eval', 'exec', 'compile', 'breakpoint',
+    'exit', 'quit'
+}
+
+def _make_blocked_builtin(name):
+    def _blocked(*args, **kwargs):
+        raise PermissionError(f"Access to restricted builtin '{name}()' is blocked in the learning sandbox.")
+    return _blocked
+
+for b_name in BLOCKED_BUILTIN_NAMES:
+    if b_name in safe_builtins:
+        safe_builtins[b_name] = _make_blocked_builtin(b_name)
+
+orig_import = safe_builtins.get('__import__')
+RESTRICTED_MODULES = {
+    'subprocess', 'commands', 'ctypes', 'multiprocessing',
+    'socket', 'http', 'urllib', 'requests', 'ftplib',
+    'xmlrpc', 'smtplib', 'poplib', 'imaplib',
+    'importlib', 'code', 'codeop', 'signal', 'resource',
+    'shutil', 'os', 'sys', 'pathlib'
+}
+
+def _guarded_import(name, *args, **kwargs):
+    root = name.split('.')[0]
+    if root in RESTRICTED_MODULES:
+        raise PermissionError(f"Import of '{name}' is restricted in the learning sandbox.")
+    if orig_import:
+        return orig_import(name, *args, **kwargs)
+    raise ImportError(f"Import mechanism unavailable for: {name}")
+
+safe_builtins['__import__'] = _guarded_import
+
+def _extract_target_names(node):
+    names = set()
+    if isinstance(node, ast.Name):
+        names.add(node.id)
+    elif isinstance(node, (ast.Tuple, ast.List)):
+        for elt in node.elts:
+            names.update(_extract_target_names(elt))
+    elif isinstance(node, ast.Starred):
+        names.update(_extract_target_names(node.value))
+    return names
+
+def _collect_assigned_names(stmt):
+    names = set()
+    if isinstance(stmt, ast.Assign):
+        for t in stmt.targets:
+            names.update(_extract_target_names(t))
+    elif isinstance(stmt, ast.AnnAssign):
+        names.update(_extract_target_names(stmt.target))
+    elif isinstance(stmt, ast.AugAssign):
+        names.update(_extract_target_names(stmt.target))
+    elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        names.add(stmt.name)
+    elif isinstance(stmt, ast.Import):
+        for alias in stmt.names:
+            names.add(alias.asname or alias.name.split('.')[0])
+    elif isinstance(stmt, ast.ImportFrom):
+        for alias in stmt.names:
+            if alias.name != '*':
+                names.add(alias.asname or alias.name)
+    elif isinstance(stmt, ast.For):
+        names.update(_extract_target_names(stmt.target))
+    elif isinstance(stmt, ast.With):
+        for item in stmt.items:
+            if item.optional_vars:
+                names.update(_extract_target_names(item.optional_vars))
+    return names
+
+def _stmt_source(stmt):
+    ln = getattr(stmt, 'lineno', None)
+    if ln and 1 <= ln <= len(code_lines):
+        return code_lines[ln - 1].strip()
+    return ""
+
+result = {'blocked': False, 'status': 'Success', 'issues': [], 'stdout': '', 'stderr': ''}
+try:
+    tree = ast.parse(code, filename='<user_code>')
+except SyntaxError as e:
+    result = {
+        'blocked': False,
+        'status': 'SyntaxError',
+        'issues': [{
+            'id': 1,
+            'type': 'SyntaxError',
+            'message': str(e.msg) if e.msg else str(e),
+            'line': e.lineno or 1,
+            'stmt_line': e.lineno or 1,
+            'traceback_line': code_lines[(e.lineno or 1) - 1] if code_lines and 1 <= (e.lineno or 1) <= len(code_lines) else '',
+            'statement': code_lines[(e.lineno or 1) - 1].strip() if code_lines and 1 <= (e.lineno or 1) <= len(code_lines) else '',
+            'cascade_of': None,
+        }],
+        'stdout': '',
+        'stderr': f"SyntaxError: {e.msg} (line {e.lineno})",
+    }
+    sys.stdout = old_stdout
+    sys.stderr = old_stderr
+    sys.stdout.write(json.dumps(result))
+    raise SystemExit(0)
+
+namespace = {'__builtins__': safe_builtins}
+issues = []
+failed_defs = {}
+
+total_deadline = time.perf_counter() + total_timeout
+stmt_deadline = [0.0]
+
+def _watchdog_trace(frame, event, arg):
+    if frame.f_code.co_filename != '<user_code>':
+        return None
+    if event == 'line' or event == 'call':
+        now = time.perf_counter()
+        if now > total_deadline:
+            raise TimeoutError(f"Execution exceeded total sandbox timeout ({total_timeout:.1f}s).")
+        if now > stmt_deadline[0]:
+            raise TimeoutError(f"Statement timed out after {per_stmt_timeout:.1f}s (possible infinite loop).")
+    return _watchdog_trace
+
+for stmt in tree.body:
+    if time.perf_counter() >= total_deadline:
+        issues.append({
+            'id': len(issues) + 1,
+            'type': 'TimeoutError',
+            'message': f"Total sandbox timeout ({total_timeout:.1f}s) reached; remaining statements skipped.",
+            'line': getattr(stmt, 'lineno', 1),
+            'stmt_line': getattr(stmt, 'lineno', 1),
+            'traceback_line': _stmt_source(stmt),
+            'statement': _stmt_source(stmt),
+            'cascade_of': None,
+        })
+        break
+
+    mod = ast.Module(body=[stmt], type_ignores=[])
+    compiled_stmt = compile(mod, '<user_code>', 'exec')
+    is_import_stmt = isinstance(stmt, (ast.Import, ast.ImportFrom))
+    t_stmt_start = time.perf_counter()
+    stmt_deadline[0] = min(t_stmt_start + per_stmt_timeout, total_deadline)
+
+    try:
+        if not is_import_stmt:
+            sys.settrace(_watchdog_trace)
+        exec(compiled_stmt, namespace, namespace)
+    except BaseException as e:
+        sys.settrace(None)
+        tb = traceback.extract_tb(e.__traceback__)
+        user_frames = [f for f in tb if f.filename == '<user_code>']
+        err_line = user_frames[-1].lineno if user_frames else getattr(stmt, 'lineno', 1)
+        tb_src = code_lines[err_line - 1].strip() if code_lines and 1 <= err_line <= len(code_lines) else ''
+        err_type = type(e).__name__
+        err_msg = str(e)
+
+        cascade_of = None
+        if err_type == 'NameError':
+            m = re.search(r"name '(\w+)' is not defined", err_msg)
+            if m and m.group(1) in failed_defs:
+                cascade_of = failed_defs[m.group(1)]
+
+        issue_id = len(issues) + 1
+        root_cause_id = cascade_of if cascade_of is not None else issue_id
+        for var_name in _collect_assigned_names(stmt):
+            if var_name not in namespace:
+                failed_defs[var_name] = root_cause_id
+
+        issues.append({
+            'id': issue_id,
+            'type': err_type,
+            'message': err_msg,
+            'line': err_line,
+            'stmt_line': getattr(stmt, 'lineno', err_line),
+            'traceback_line': tb_src,
+            'statement': _stmt_source(stmt),
+            'cascade_of': cascade_of,
+        })
+    finally:
+        sys.settrace(None)
+        if is_import_stmt:
+            imp_elapsed = time.perf_counter() - t_stmt_start
+            total_deadline += min(imp_elapsed, 5.0)
+
+sys.stdout = old_stdout
+sys.stderr = old_stderr
+
+result = {
+    'blocked': False,
+    'status': 'Success' if not issues else 'Errors',
+    'issues': issues,
+    'stdout': buf_out.getvalue()[:20000],
+    'stderr': buf_err.getvalue()[:10000],
+}
+
+out_str = json.dumps(result)
+if len(out_str) > 150000:
+    result['stdout'] = result['stdout'][:2000] + '... [TRUNCATED]'
+    result['issues'] = result['issues'][:50]
+    out_str = json.dumps(result)
+
+sys.stdout.write(out_str)
+"""
+
+        payload = json.dumps({
+            "code": code,
+            "stdin": stdin_data or "",
+            "total_timeout": total_t,
+            "per_stmt_timeout": stmt_t,
+        })
+
+        has_heavy_import = any(
+            pkg in code for pkg in ("import pandas", "from pandas", "import numpy", "from numpy", "import scipy", "import matplotlib", "import sklearn")
+        )
+        sub_timeout = (total_t + 5.0) if has_heavy_import else (total_t + 0.8)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", resilient_runner],
+                input=payload,
+                text=True,
+                capture_output=True,
+                timeout=sub_timeout,
+            )
+            if proc.stdout.strip():
+                return json.loads(proc.stdout.strip())
+            return {
+                "blocked": False,
+                "status": "RuntimeError",
+                "stdout": "",
+                "stderr": proc.stderr.strip() or "Resilient sandbox exited without output.",
+                "issues": [{
+                    "id": 1,
+                    "type": "RuntimeError",
+                    "message": proc.stderr.strip() or "Process terminated unexpectedly.",
+                    "line": 1,
+                    "stmt_line": 1,
+                    "traceback_line": "",
+                    "statement": "",
+                    "cascade_of": None,
+                }],
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "blocked": False,
+                "status": "TimeoutError",
+                "stdout": "",
+                "stderr": f"TimeoutError: Execution exceeded {total_t:.1f}s total sandbox limit.",
+                "issues": [{
+                    "id": 1,
+                    "type": "TimeoutError",
+                    "message": f"Execution exceeded {total_t:.1f}s total sandbox limit.",
+                    "line": 1,
+                    "stmt_line": 1,
+                    "traceback_line": "",
+                    "statement": "",
+                    "cascade_of": None,
+                }],
+            }
+        except Exception as e:
+            return {
+                "blocked": False,
+                "status": "ExecutionError",
+                "stdout": "",
+                "stderr": str(e),
+                "issues": [{
+                    "id": 1,
+                    "type": "ExecutionError",
+                    "message": str(e),
+                    "line": 1,
+                    "stmt_line": 1,
+                    "traceback_line": "",
+                    "statement": "",
+                    "cascade_of": None,
+                }],
+            }
 
     def _format_syntax_error(self, error: SyntaxError, code: str) -> Dict:
         """Format syntax errors with context."""

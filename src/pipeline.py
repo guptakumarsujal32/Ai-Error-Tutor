@@ -1,27 +1,22 @@
 import os
 import re
 import ast
+import difflib
 from typing import Optional, Dict, List
 from dataclasses import dataclass, field
 
 try:
     from .error_capture import ErrorCapture
     from .ast_parser import ASTContextExtractor
-    from .gemini_client import GeminiErrorExplainer
     from .fallback import FallbackExplainer
-    from .model import ErrorExplainerModel
     from .code_analyzer import CodeHealthAnalyzer, CodeHealthReport
     from .security import SecurityWarning
     from .aai_security_guard import AAISecurityGuard, ThreatCategory, RiskLevel
+    from llm.ollama_client import OllamaClient, LLMError, check_ollama_health
 except ImportError:
     from error_capture import ErrorCapture
     from ast_parser import ASTContextExtractor
-    from gemini_client import GeminiErrorExplainer
     from fallback import FallbackExplainer
-    try:
-        from model import ErrorExplainerModel
-    except ImportError:
-        ErrorExplainerModel = None
     try:
         from code_analyzer import CodeHealthAnalyzer, CodeHealthReport
     except ImportError:
@@ -33,6 +28,14 @@ except ImportError:
     except ImportError:
         SecurityWarning = None
         AAISecurityGuard = None
+    try:
+        from llm.ollama_client import OllamaClient, LLMError, check_ollama_health
+    except ImportError:
+        OllamaClient = None
+        LLMError = Exception
+        check_ollama_health = None
+
+import config
 
 try:
     from .multi_agent_system import CompilerOrchestratorAgent, CompilerPhase, BaseCompilerAgent
@@ -73,19 +76,21 @@ class ExplanationResult:
     attack_category: Optional[str] = None
     compiler_phase: Optional[str] = None
     agent_name: Optional[str] = None
+    errors_resolved: list = field(default_factory=list)
+    repair_report: Optional[Dict] = None
 
 
 class AIErrorTutor:
     """Main pipeline for AI-powered error explanations with multi-tier fallback."""
 
-    def __init__(self, model_path: Optional[str] = None, use_ai: bool = True, use_t5_bridge: bool = True):
+    def __init__(self, model_path: Optional[str] = None, use_ai: bool = True, use_t5_bridge: bool = False, **kwargs):
         """
-        Initialize the AI Error Tutor.
+        Initialize the AI Error Tutor with Tier 1 Local LLM (Ollama) and Tier 2 Rule-based AST fallback.
 
         Args:
-            model_path: Optional path to local fine-tuned T5 model
-            use_ai: Whether to attempt Gemini first
-            use_t5_bridge: Whether to use local T5 model as fallback when Gemini is unavailable
+            model_path: Deprecated, kept for backward compatibility
+            use_ai: Whether to attempt Local LLM (Ollama) first
+            use_t5_bridge: Deprecated, kept for backward compatibility
         """
         self.error_capture = ErrorCapture()
         self.ast_extractor = ASTContextExtractor()
@@ -93,45 +98,47 @@ class AIErrorTutor:
         self.health_analyzer = CodeHealthAnalyzer() if CodeHealthAnalyzer else None
 
         self.use_ai = use_ai
-        self.use_t5_bridge = use_t5_bridge
-        self.gemini_model = None
-        self.t5_model = None
+        self.ollama_client = None
         self.aai_guard = AAISecurityGuard() if AAISecurityGuard else None
         self.orchestrator = CompilerOrchestratorAgent() if CompilerOrchestratorAgent else None
-        self.t5_path = model_path or os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "models",
-            "error_tutor_model"
+        self._last_errors_resolved: List[Dict] = []
+
+        # Initialize Tier 1: Local LLM (Ollama)
+        if use_ai and OllamaClient is not None:
+            try:
+                self.ollama_client = OllamaClient()
+                if self.ollama_client.is_available():
+                    print("[OK] Local LLM (Ollama) configured and active")
+                else:
+                    print("[INFO] Ollama server is offline or unreachable. Rule-based AST engine active.")
+            except Exception as e:
+                print(f"[INFO] Local LLM (Ollama) initialization note: {e}")
+                self.ollama_client = None
+
+    def analyze_all_errors(
+        self,
+        code: str,
+        mode: str = "direct",
+        stdin_data: str = "",
+        fix_warnings: bool = False,
+        progress_callback=None,
+    ) -> Dict:
+        """
+        Run the 4-pass Multi-Error Repair Loop (engine/repair_loop.py) to find
+        and fix ALL syntax and runtime errors in a single analysis.
+        """
+        from engine.repair_loop import analyze_all
+        return analyze_all(
+            code=code,
+            mode=mode,
+            stdin_data=stdin_data,
+            fix_warnings=fix_warnings,
+            use_ai=self.use_ai,
+            progress_callback=progress_callback,
+            ollama_client=self.ollama_client,
         )
 
-        # Initialize Tier 1: Gemini AI
-        if use_ai:
-            try:
-                self.gemini_model = GeminiErrorExplainer()
-                print("[OK] Gemini AI configured successfully")
-            except Exception as e:
-                print(f"[INFO] Gemini API not active: {e}")
-                self.gemini_model = None
-
-    def _get_or_load_t5_model(self) -> Optional[object]:
-        """Lazy load the local T5 model if available."""
-        if self.t5_model is not None:
-            return self.t5_model
-
-        if not self.use_t5_bridge or ErrorExplainerModel is None:
-            return None
-
-        try:
-            load_target = self.t5_path if os.path.exists(self.t5_path) else "t5-small"
-            print(f"Loading local T5 model bridge from: {load_target}...")
-            self.t5_model = ErrorExplainerModel(load_target)
-            print("[OK] Local T5 Model Bridge initialized successfully")
-            return self.t5_model
-        except Exception as e:
-            print(f"[WARN] Local T5 model could not be loaded: {e}")
-            return None
-
-    def analyze_code(self, code: str, mode: str = "direct", **kwargs) -> ExplanationResult:
+    def analyze_code(self, code: str, mode: str = "direct", stdin_data: str = "", **kwargs) -> ExplanationResult:
         """
         Analyze code and provide friendly error explanations.
 
@@ -142,14 +149,15 @@ class AIErrorTutor:
         Returns:
             ExplanationResult with error details and friendly explanation
         """
-        # Step -0.5: Enforce strict input size limits
-        if len(code) > 10000:
+        # Step -0.5: Enforce strict input size limits (5,000 lines / 500,000 chars)
+        line_count = len(code.splitlines())
+        if line_count > 5000 or len(code) > 500000:
             return ExplanationResult(
                 success=False,
                 error_type="SecurityError",
-                raw_error="Input payload exceeds 10,000 character limit.",
-                friendly_explanation="The submitted code exceeds the safety limit of 10,000 characters. Please submit a smaller snippet.",
-                suggested_fix="Reduce the size of your code snippet to under 10,000 characters.",
+                raw_error=f"Input payload ({line_count} lines, {len(code)} chars) exceeds 5,000 line / 500,000 character limit.",
+                friendly_explanation="The submitted code exceeds the safety limit of 5,000 lines (500,000 characters). Please submit a smaller snippet.",
+                suggested_fix="Reduce the size of your code snippet to under 5,000 lines.",
                 code_context=code[:120] if code else "",
                 line_number=1,
                 similar_names=[],
@@ -204,7 +212,7 @@ class AIErrorTutor:
                 )
 
         # Step 1: Execute and capture errors (security check happens inside)
-        success, error_info = self.error_capture.execute_code(code)
+        success, error_info = self.error_capture.execute_code(code, stdin_data=stdin_data)
 
         # Collect any security warnings
         sec_warnings = []
@@ -269,28 +277,21 @@ class AIErrorTutor:
                 specialist_diagnosis = specialist_agent.diagnose(error_info, code, mode=mode)
 
         # Step 3: Multi-tier explanation generation
+        # Tier 1: Gemini (Cloud) -> Tier 2: Local LLM (Ollama) -> Tier 3: Rule-based AST
         result = None
 
-        # Tier 1: Gemini API
-        if self.use_ai and self.gemini_model:
+        if self.use_ai and self.ollama_client and self.ollama_client.is_available():
             try:
-                result = self._generate_gemini_explanation(error_info, ast_context, sec_warnings, full_code=code, mode=mode)
+                result = self._generate_ollama_explanation(error_info, ast_context, sec_warnings, full_code=code, mode=mode)
             except Exception as e:
-                print(f"Gemini generation failed: {e}. Falling back to Tier 2 (T5 Model)...")
+                print(f"[INFO] LLM provider chain failed: {e}. Falling back to Tier 3 (Rule-based AST)...")
+                result = None
 
-        # Tier 2: Local T5 Model Bridge
-        if result is None:
-            t5_engine = self._get_or_load_t5_model()
-            if t5_engine:
-                try:
-                    result = self._generate_t5_explanation(error_info, ast_context, sec_warnings, full_code=code, mode=mode)
-                except Exception as e:
-                    print(f"Local T5 generation failed: {e}. Falling back to Tier 3 (Rules)...")
-
-        # Tier 3: Rule-based fallback
+        # Tier 3: Rule-based fallback (AST)
         if result is None:
             result = self._generate_fallback_explanation(error_info, ast_context, full_code=code, mode=mode)
             result.security_warnings = sec_warnings
+            result.engine_used = "Rule-based"
 
         # Attach Compiler Phase & Specialist Agent details
         if result:
@@ -306,22 +307,61 @@ class AIErrorTutor:
                     result.socratic_question = specialist_diagnosis.socratic_question
                     result.progressive_hints = specialist_diagnosis.progressive_hints
 
-        # Step 4: Automated Verification & Refinement of Recommended Fix (Max 3 attempts)
-        if result and result.corrected_code:
-            verified_code, is_verified, attempts = self._verify_and_refine_fix(
-                initial_code=result.corrected_code,
-                original_code=code,
-                original_error=error_info,
-                mode=mode,
-                max_attempts=3
-            )
-            result.corrected_code = verified_code
-            result.fix_verified = is_verified
-            result.fix_verification_attempts = attempts
+        # Step 4: Automated Multi-Error Verification & Refinement Loop (Max 50 attempts)
+        if result:
+            if not result.corrected_code:
+                result.corrected_code = self._synthesize_fixed_code(code, error_info, ast_context)
+            if result.corrected_code:
+                verified_code, is_verified, attempts = self._verify_and_refine_fix(
+                    initial_code=result.corrected_code,
+                    original_code=code,
+                    original_error=error_info,
+                    mode=mode,
+                    max_attempts=50,
+                    stdin_data=stdin_data
+                )
+                result.corrected_code = verified_code
+                result.fix_verified = is_verified
+                result.fix_verification_attempts = attempts
+                result.errors_resolved = list(self._last_errors_resolved)
+
+                if len(result.errors_resolved) > 1 and is_verified:
+                    fixed_count = sum(1 for e in result.errors_resolved if e.get("status") == "Fixed")
+                    result.suggested_fix = (
+                        f"Resolved all {fixed_count} errors across your code and verified clean execution in the sandbox."
+                    )
 
         result.health_report = health_report
         result.hint_mode = (mode == "socratic")
         return result
+
+    def _is_large_file(self, code: str) -> bool:
+        """Returns True if code is too large to send verbatim to the 4K-context local LLM."""
+        return len(code) > 4000 or len(code.splitlines()) > 120
+
+    def _get_line_safe(self, code: str, line_number: Optional[int]) -> str:
+        """Safely returns the 1-indexed source line from code."""
+        if not code or not line_number:
+            return ""
+        lines = code.splitlines()
+        if 1 <= line_number <= len(lines):
+            return lines[line_number - 1]
+        return ""
+
+    def _extract_window(self, full_code: str, line_number: Optional[int], radius: int = 15):
+        """Extracts a local ±radius line window around line_number for small-LLM patching."""
+        lines = full_code.split('\n')
+        target = max(1, min(line_number or 1, len(lines)))
+        start_idx = max(0, target - 1 - radius)
+        end_idx = min(len(lines), target + radius)
+        return '\n'.join(lines[start_idx:end_idx]), start_idx, end_idx
+
+    def _splice_window(self, full_code: str, fixed_window: str, start_idx: int, end_idx: int) -> str:
+        """Splices a patched code window back into the full file preserving all other lines."""
+        lines = full_code.split('\n')
+        patched_lines = fixed_window.split('\n')
+        merged = lines[:start_idx] + patched_lines + lines[end_idx:]
+        return '\n'.join(merged)
 
     def _get_clean_code_context(self, error_info: Dict) -> str:
         """Extract clean code context without debug markers or line numbers."""
@@ -336,26 +376,64 @@ class AIErrorTutor:
         end = min(len(lines), line_number + 2)
         return '\n'.join(lines[start:end]).strip()
 
-    def _generate_gemini_explanation(self, error_info: Dict,
+    def _generate_ollama_explanation(self, error_info: Dict,
                                      ast_context: Dict,
                                      sec_warnings: list,
                                      full_code: str = "",
                                      mode: str = "direct") -> ExplanationResult:
-        """Generate explanation using Tier 1: Gemini Structured JSON Engine."""
+        """Generate structured explanation using Tier 1: Local LLM (Ollama)."""
         clean_context = self._get_clean_code_context(error_info)
+        large_file = self._is_large_file(full_code)
+        llm_code_input = full_code
+        win_start, win_end = 0, len(full_code.split('\n'))
 
-        data = self.gemini_model.generate_explanation_json(
-            error_type=error_info['error_type'],
-            error_message=error_info['message'],
-            code_context=clean_context,
-            full_code=full_code,
-            mode=mode
-        )
+        if large_file:
+            llm_code_input, win_start, win_end = self._extract_window(
+                full_code, error_info.get('line_number'), radius=15
+            )
+
+        if mode == "socratic":
+            data = self.ollama_client.generate_socratic_tutoring(
+                error_type=error_info['error_type'],
+                error_message=error_info['message'],
+                code_context=clean_context,
+                full_code=llm_code_input
+            )
+        else:
+            data = self.ollama_client.generate_direct_solution(
+                error_type=error_info['error_type'],
+                error_message=error_info['message'],
+                code_context=clean_context,
+                full_code=llm_code_input
+            )
+
+        provider_id = str(data.get("_provider_id") or "ollama").lower()
+        provider_name = str(data.get("_provider") or "Local LLM (Ollama)")
+        model_name = data.get("_model_used", config.MODELS.get("diagnostician", "qwen2.5-coder:3b"))
+        if provider_id == "gemini":
+            engine_label = "Gemini"
+            used_ai_flag = True
+        elif provider_id == "rules":
+            engine_label = "Rule-based"
+            used_ai_flag = False
+        else:
+            engine_label = "Local LLM (Ollama)"
+            used_ai_flag = True
 
         concept = data.get("concept", self._get_default_concept(error_info['error_type']))
         explanation = data.get("explanation", "An error occurred during execution.")
         fix = data.get("suggested_fix", self._generate_basic_fix(error_info, ast_context))
-        corrected_code = data.get("corrected_code") or self._synthesize_fixed_code(full_code, error_info, ast_context)
+
+        if large_file:
+            # Prefer surgical AST patch to preserve all surrounding lines cleanly;
+            # fall back to splicing the LLM's fixed window into the full file.
+            corrected_code = self._synthesize_fixed_code(full_code, error_info, ast_context)
+            if not corrected_code and data.get("corrected_code"):
+                cand_win = str(data.get("corrected_code")).strip()
+                if cand_win and len(cand_win.splitlines()) >= max(1, (win_end - win_start) // 3):
+                    corrected_code = self._splice_window(full_code, cand_win, win_start, win_end)
+        else:
+            corrected_code = data.get("corrected_code") or self._synthesize_fixed_code(full_code, error_info, ast_context)
         prevention_tip = data.get("prevention_tip", self._get_default_prevention_tip(error_info['error_type']))
         socratic_q = data.get("socratic_question")
         prog_hints = data.get("progressive_hints", [])
@@ -373,61 +451,8 @@ class AIErrorTutor:
             line_number=error_info['line_number'],
             similar_names=ast_context.get('similar_names', []),
             security_warnings=sec_warnings,
-            ai_used=True,
-            engine_used="gemini",
-            concept=concept,
-            corrected_code=corrected_code,
-            prevention_tip=prevention_tip,
-            hint_mode=(mode == "socratic"),
-            socratic_question=socratic_q,
-            progressive_hints=prog_hints
-        )
-
-    def _generate_t5_explanation(self, error_info: Dict,
-                                 ast_context: Dict,
-                                 sec_warnings: list,
-                                 full_code: str = "",
-                                 mode: str = "direct") -> ExplanationResult:
-        """Generate explanation using Tier 2: Local T5 Transformer Model Bridge."""
-        clean_context = self._get_clean_code_context(error_info)
-        raw_output = self.t5_model.generate_explanation(
-            error_type=error_info['error_type'],
-            error_message=error_info['message'],
-            code_context=clean_context
-        )
-
-        error_type = error_info['error_type']
-        concept = self._get_default_concept(error_type)
-        prevention_tip = self._get_default_prevention_tip(error_type)
-        corrected_code = self._synthesize_fixed_code(full_code, error_info, ast_context)
-
-        if error_type == 'TimeoutError':
-            explanation = "Your code exceeded the execution limit (2.0s watchdog). This indicates an infinite loop or non-terminating recursion."
-            fix = "Add a termination condition or 'break' statement inside your loop, or ensure your recursion has a reachable base case."
-        elif 'FIX:' in raw_output:
-            parts = raw_output.split('FIX:', 1)
-            explanation = parts[0].replace('EXPLANATION:', '').strip()
-            fix = parts[1].strip() or None
-        else:
-            explanation = raw_output.strip()
-            fix = self._generate_basic_fix(error_info, ast_context)
-
-        socratic_q, prog_hints = (None, [])
-        if mode == "socratic":
-            socratic_q, prog_hints = self._get_socratic_materials(error_info, ast_context)
-
-        return ExplanationResult(
-            success=False,
-            error_type=error_type,
-            raw_error=error_info['message'],
-            friendly_explanation=explanation,
-            suggested_fix=fix,
-            code_context=error_info['code_context'],
-            line_number=error_info['line_number'],
-            similar_names=ast_context.get('similar_names', []),
-            security_warnings=sec_warnings,
-            ai_used=True,
-            engine_used="t5_local",
+            ai_used=used_ai_flag,
+            engine_used=engine_label,
             concept=concept,
             corrected_code=corrected_code,
             prevention_tip=prevention_tip,
@@ -592,7 +617,16 @@ class AIErrorTutor:
                 if match and line_num and 1 <= line_num <= len(lines):
                     bad_name = match.group(1)
                     target_line = lines[line_num - 1]
-                    similar = ast_context.get('similar_names', [])
+                    similar = list(ast_context.get('similar_names', []) or [])
+
+                    # Supplement with difflib against standard Python builtins if empty
+                    if not similar:
+                        builtin_names = [
+                            'print', 'len', 'range', 'int', 'str', 'float', 'list', 'dict',
+                            'set', 'tuple', 'sum', 'min', 'max', 'abs', 'sorted', 'enumerate',
+                            'zip', 'map', 'filter', 'round', 'type', 'isinstance', 'input', 'bool'
+                        ]
+                        similar = difflib.get_close_matches(bad_name, builtin_names, n=2, cutoff=0.65)
 
                     # 1. Check if defined on a later line (used before definition)
                     later_def_idx = None
@@ -608,56 +642,120 @@ class AIErrorTutor:
                     # 2. Check for typo in function call or variable (e.g. prnt -> print or itms -> items)
                     if similar:
                         # Avoid replacing variable in arithmetic with built-in functions like print/len
-                        candidates = [s for s in similar if not (s in ('print', 'len', 'range', 'open') and not '(' in target_line)]
+                        candidates = [s for s in similar if not (s in ('print', 'len', 'range', 'open') and '(' not in target_line)]
                         if candidates:
                             best_candidate = candidates[0]
                             lines[line_num - 1] = re.sub(r'\b' + re.escape(bad_name) + r'\b', best_candidate, target_line)
                             return '\n'.join(lines)
 
-                    # 3. Simple undefined variable -> prepend declaration
-                    return f"{bad_name} = 10  # Initialized variable\n" + full_code
+                    # 3. Simple undefined variable -> initialize cleanly preserving indentation
+                    indent = re.match(r'^(\s*)', target_line).group(1)
+                    lines.insert(line_num - 1, f"{indent}{bad_name} = 10  # Initialized variable")
+                    return '\n'.join(lines)
 
             elif err == 'SyntaxError':
                 if line_num and 1 <= line_num <= len(lines):
                     target_line = lines[line_num - 1]
-                    # Missing colon fix for def, if, for, while, class, elif, else
-                    if re.search(r'^\s*(def|if|for|while|class|elif|else)\b.*[^:]\s*$', target_line):
-                        lines[line_num - 1] = target_line.rstrip() + ":"
+                    code_part, sep, comment_part = target_line.partition('#')
+                    stripped_code = code_part.rstrip()
+                    # 1. Missing colon fix for def, if, for, while, class, elif, else, try, except, finally, with
+                    if re.search(r'^\s*(def|if|for|while|class|elif|else|try|except|finally|with)\b.*[^:]\s*$', stripped_code):
+                        fixed = stripped_code + ":" + (f"  #{comment_part}" if sep else "")
+                        lines[line_num - 1] = fixed
+                        return '\n'.join(lines)
+                    # 2. Single '=' inside if/elif/while condition -> '=='
+                    if re.search(r'^\s*(if|elif|while)\b.*(?<![=!<>])=(?!=)', stripped_code):
+                        fixed = re.sub(r'(?<![=!<>])=(?!=)', '==', stripped_code, count=1) + (f"  #{comment_part}" if sep else "")
+                        lines[line_num - 1] = fixed
+                        return '\n'.join(lines)
+                    # 3. Unclosed parenthesis on target line
+                    if stripped_code.count('(') > stripped_code.count(')'):
+                        diff = stripped_code.count('(') - stripped_code.count(')')
+                        fixed = stripped_code + (')' * diff) + (f"  #{comment_part}" if sep else "")
+                        lines[line_num - 1] = fixed
                         return '\n'.join(lines)
 
             elif err == 'TypeError':
                 if line_num and 1 <= line_num <= len(lines):
                     target_line = lines[line_num - 1]
                     msg = error_info.get('message', '')
+                    code_part, sep, comment_part = target_line.partition('#')
 
                     # 1. Uncalled built-in function used in arithmetic (e.g. abs + 2 or len + 1)
                     if 'builtin_function_or_method' in msg or 'function' in msg:
-                        # Fix common builtins like abs, len, max, min, sum
-                        fixed_line = re.sub(r'\babs\s*(\+|\-|\*|\/)', r'abs(-5) \1', target_line)
-                        fixed_line = re.sub(r'\blen\s*(\+|\-|\*|\/)', r'len([1, 2]) \1', fixed_line)
-                        lines[line_num - 1] = fixed_line
-                        return '\n'.join(lines)
+                        fixed_code = re.sub(r'\babs\s*(\+|\-|\*|\/)', r'abs(-5) \1', code_part)
+                        fixed_code = re.sub(r'\blen\s*(\+|\-|\*|\/)', r'len([1, 2]) \1', fixed_code)
+                        if fixed_code != code_part:
+                            lines[line_num - 1] = fixed_code + (f"#{comment_part}" if sep else "")
+                            return '\n'.join(lines)
 
-                    # 2. String and non-string concatenation (e.g. "+ age" -> "+ str(age)")
-                    if '+' in target_line:
-                        fixed_line = re.sub(r'\+\s*([a-zA-Z_]\w*)', r'+ str(\1)', target_line)
-                        lines[line_num - 1] = fixed_line
-                        return '\n'.join(lines)
+                    # 2. String and non-string concatenation (e.g. "+ age" -> "+ str(age)" or "age + 'x'" -> "str(age) + 'x'")
+                    if '+' in code_part:
+                        fixed_code = re.sub(r'\+\s*(?!str\()([a-zA-Z_]\w*|\d+(?:\.\d+)?)', r'+ str(\1)', code_part)
+                        if fixed_code == code_part:
+                            fixed_code = re.sub(r'(?<!str\()(\b[a-zA-Z_]\w*|\b\d+(?:\.\d+)?)\s*\+', r'str(\1) +', code_part, count=1)
+                        if fixed_code != code_part:
+                            lines[line_num - 1] = fixed_code + (f"#{comment_part}" if sep else "")
+                            return '\n'.join(lines)
 
             elif err == 'IndexError':
                 if line_num and 1 <= line_num <= len(lines):
                     target_line = lines[line_num - 1]
-                    # Fix large index like [10] to [0] or [len-1]
-                    fixed_line = re.sub(r'\[\d+\]', '[0]', target_line)
-                    lines[line_num - 1] = fixed_line
-                    return '\n'.join(lines)
+                    code_part, sep, comment_part = target_line.partition('#')
+                    fixed_code = re.sub(r'\[\s*-?\d+\s*\]', '[0]', code_part)
+                    if fixed_code != code_part:
+                        lines[line_num - 1] = fixed_code + (f"#{comment_part}" if sep else "")
+                        return '\n'.join(lines)
+
+            elif err == 'KeyError':
+                if line_num and 1 <= line_num <= len(lines):
+                    target_line = lines[line_num - 1]
+                    code_part, sep, comment_part = target_line.partition('#')
+                    # Convert dict_var["missing_key"] -> dict_var.get("missing_key")
+                    fixed_code = re.sub(
+                        r'(\b[a-zA-Z_]\w*)\[\s*([^\]]+)\s*\]',
+                        r'\1.get(\2)',
+                        code_part,
+                        count=1
+                    )
+                    if fixed_code != code_part:
+                        lines[line_num - 1] = fixed_code + (f"#{comment_part}" if sep else "")
+                        return '\n'.join(lines)
 
             elif err == 'ZeroDivisionError':
                 if line_num and 1 <= line_num <= len(lines):
                     target_line = lines[line_num - 1]
-                    fixed_line = re.sub(r'/\s*0', r'/ 2', target_line)
-                    lines[line_num - 1] = fixed_line
-                    return '\n'.join(lines)
+                    code_part, sep, comment_part = target_line.partition('#')
+                    # 1. Literal zero divisor (e.g. / 0 -> / 2)
+                    fixed_code = re.sub(r'(//|/|%)\s*0(?![.\d])', r'\1 2', code_part)
+                    # 2. Variable divisor (e.g. / divisor -> / (divisor or 1))
+                    if fixed_code == code_part:
+                        fixed_code = re.sub(
+                            r'(//|/|%)\s*([a-zA-Z_]\w*)',
+                            r'\1 (\2 or 1)',
+                            code_part,
+                            count=1
+                        )
+                    if fixed_code != code_part:
+                        lines[line_num - 1] = fixed_code + (f"#{comment_part}" if sep else "")
+                        return '\n'.join(lines)
+
+            elif err == 'AttributeError':
+                if line_num and 1 <= line_num <= len(lines):
+                    target_line = lines[line_num - 1]
+                    msg = error_info.get('message', '')
+                    m = re.search(r"has no attribute '(\w+)'", msg)
+                    if m:
+                        bad_attr = m.group(1)
+                        common_methods = [
+                            'append', 'extend', 'insert', 'remove', 'pop', 'sort', 'reverse', 'clear', 'copy',
+                            'upper', 'lower', 'strip', 'split', 'join', 'replace', 'find', 'format', 'startswith', 'endswith',
+                            'keys', 'values', 'items', 'get', 'update', 'add', 'discard'
+                        ]
+                        matches = difflib.get_close_matches(bad_attr, common_methods, n=1, cutoff=0.65)
+                        if matches:
+                            lines[line_num - 1] = re.sub(r'\.' + re.escape(bad_attr) + r'\b', '.' + matches[0], target_line)
+                            return '\n'.join(lines)
 
             elif err == 'TimeoutError':
                 # Replace while True: with a bounded loop
@@ -702,7 +800,9 @@ class AIErrorTutor:
 
         SAFE_PERMITTED_NEW_MODULES = {
             'math', 'random', 're', 'datetime', 'collections',
-            'itertools', 'functools', 'string'
+            'itertools', 'functools', 'string',
+            'statistics', 'decimal', 'fractions', 'json', 'csv',
+            'numpy', 'pandas', 'scipy', 'matplotlib',
         }
 
         try:
@@ -720,7 +820,15 @@ class AIErrorTutor:
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     orig_imports.add(node.module.split('.')[0])
         except SyntaxError:
-            pass
+            for imp_m in re.finditer(r"^[ \t]*import[ \t]+([\w., \t]+)", original_code, re.MULTILINE):
+                for part in imp_m.group(1).split(","):
+                    tokens = part.strip().split()
+                    if tokens:
+                        orig_imports.add(tokens[0].split(".")[0])
+            for from_m in re.finditer(r"^[ \t]*from[ \t]+([\w.]+)[ \t]+import\b", original_code, re.MULTILINE):
+                mod = from_m.group(1).split(".")[0]
+                if mod:
+                    orig_imports.add(mod)
 
         # Check candidate imports
         for node in ast.walk(cand_tree):
@@ -742,71 +850,152 @@ class AIErrorTutor:
         original_code: str,
         original_error: Dict,
         mode: str = "direct",
-        max_attempts: int = 3
+        max_attempts: int = 50,
+        stdin_data: str = ""
     ) -> tuple:
         """
-        Verifies candidate corrected code by executing it in the sandbox.
-        If the candidate code throws an error, iteratively refines and re-tests it up to max_attempts (3).
+        Multi-Error Automated Verification & Repair Loop.
+        Executes candidate code in the sandbox and iteratively fixes EVERY syntax and
+        runtime error encountered (up to max_attempts=50) until the entire script
+        executes with 0 errors. Uses windowed (±15 line) LLM patching for large files.
 
         Returns:
             (best_code, is_verified, attempts_count)
+            Also populates self._last_errors_resolved with per-error diff records.
         """
         current_candidate = initial_code
         attempts = 0
 
+        orig_line = original_error.get('line_number')
+        errors_log: List[Dict] = [{
+            "index": 1,
+            "line_number": orig_line,
+            "error_type": original_error.get('error_type', 'Error'),
+            "message": original_error.get('message', ''),
+            "before_line": self._get_line_safe(original_code, orig_line),
+            "after_line": self._get_line_safe(initial_code or "", orig_line),
+            "status": "Fixing"
+        }]
+        self._last_errors_resolved = errors_log
+
         while attempts < max_attempts:
             attempts += 1
             if not current_candidate or not current_candidate.strip():
-                # Synthesize fallback from AST
                 ast_ctx = self.ast_extractor.analyze_error_context(original_error)
                 current_candidate = self._synthesize_fixed_code(original_code, original_error, ast_ctx)
                 if not current_candidate:
+                    errors_log[-1]["status"] = "Remaining"
+                    self._last_errors_resolved = errors_log
                     return None, False, attempts
+                errors_log[-1]["after_line"] = self._get_line_safe(current_candidate, orig_line)
 
             # Egress Guard: Audit candidate healed code for hidden agendas / trojan insertions
             if hasattr(self, 'aai_guard') and self.aai_guard:
                 healed_assessment = self.aai_guard.audit_healed_code(current_candidate, original_code=original_code)
                 if not healed_assessment.is_safe:
-                    # Candidate code contains trojan/hidden agenda - block from verification sandbox and discard!
                     current_candidate = None
                     continue
 
-            # Import Egress Gate: Prevent candidate code from introducing unapproved external imports
-            if not self._is_healed_code_safe_to_verify(current_candidate, original_code):
-                current_candidate = None
-                continue
+            # Check if candidate still has a subsequent SyntaxError (e.g. multi-SyntaxError files)
+            # before running the AST import gate, so we can patch additional SyntaxErrors seamlessly.
+            test_error = None
+            success = False
+            try:
+                ast.parse(current_candidate)
+            except SyntaxError as syn_e:
+                test_error = {
+                    'error_type': 'SyntaxError',
+                    'message': str(syn_e.msg) if syn_e.msg else str(syn_e),
+                    'line_number': syn_e.lineno,
+                    'offset': syn_e.offset,
+                    'raw_traceback': f"SyntaxError: {syn_e.msg} (line {syn_e.lineno})",
+                    'full_code': current_candidate
+                }
 
-            # Test execution in sandbox
-            success, test_error = self.error_capture.execute_code(current_candidate)
+            if test_error is None:
+                # Import Egress Gate: Prevent candidate code from introducing unapproved external imports
+                if not self._is_healed_code_safe_to_verify(current_candidate, original_code):
+                    current_candidate = None
+                    continue
+
+                # Test execution in sandbox
+                success, test_error = self.error_capture.execute_code(current_candidate, stdin_data=stdin_data)
 
             if success:
-                # Execution succeeded without any runtime or syntax errors!
+                # All errors resolved — entire script ran cleanly with exit code 0!
+                for entry in errors_log:
+                    entry["status"] = "Fixed"
+                self._last_errors_resolved = errors_log
                 return current_candidate, True, attempts
+
+            # Record newly uncovered error if we moved past the previous error
+            err_line = test_error.get('line_number')
+            err_type = test_error.get('error_type', 'Error')
+            err_msg = test_error.get('message', '')
+            last_entry = errors_log[-1]
+            if err_line != last_entry.get("line_number") or err_type != last_entry.get("error_type"):
+                last_entry["status"] = "Fixed"
+                errors_log.append({
+                    "index": len(errors_log) + 1,
+                    "line_number": err_line,
+                    "error_type": err_type,
+                    "message": err_msg,
+                    "before_line": self._get_line_safe(current_candidate, err_line),
+                    "after_line": "",
+                    "status": "Fixing"
+                })
 
             # If error occurred and we have remaining attempts, refine:
             if attempts < max_attempts:
                 refined = None
-                # Tier 1: Try Gemini refinement if active
-                if self.use_ai and self.gemini_model and hasattr(self.gemini_model, 'refine_fix'):
-                    try:
-                        refined = self.gemini_model.refine_fix(
-                            original_code=original_code,
-                            failed_fix_code=current_candidate,
-                            error_type=test_error.get('error_type', 'Error'),
-                            error_message=test_error.get('message', '')
-                        )
-                    except Exception:
-                        refined = None
+                is_large = self._is_large_file(current_candidate)
 
-                # Tier 2/3: Try AST synthesis on the new error
-                if not refined or not refined.strip():
+                if is_large:
+                    # For large files (up to 5,000 lines):
+                    # 1. Try instant surgical AST patch first (preserves all surrounding lines)
                     new_ast_ctx = self.ast_extractor.analyze_error_context(test_error)
                     refined = self._synthesize_fixed_code(current_candidate, test_error, new_ast_ctx)
 
+                    # 2. If AST couldn't patch it, ask Local LLM to fix ONLY a ±15-line window
+                    if (not refined or not refined.strip()) and self.use_ai and self.ollama_client and hasattr(self.ollama_client, 'refine_fix'):
+                        try:
+                            win_code, win_start, win_end = self._extract_window(current_candidate, err_line, radius=15)
+                            win_fixed = self.ollama_client.refine_fix(
+                                original_code=win_code,
+                                failed_fix_code=win_code,
+                                error_type=err_type,
+                                error_message=err_msg
+                            )
+                            if win_fixed and win_fixed.strip() and win_fixed.strip() != win_code.strip():
+                                if len(win_fixed.splitlines()) >= max(1, (win_end - win_start) // 3):
+                                    refined = self._splice_window(current_candidate, win_fixed.strip(), win_start, win_end)
+                        except Exception:
+                            refined = None
+                else:
+                    # For normal files: try Local LLM refinement first, then deterministic AST synthesis
+                    if self.use_ai and self.ollama_client and hasattr(self.ollama_client, 'refine_fix'):
+                        try:
+                            refined = self.ollama_client.refine_fix(
+                                original_code=original_code,
+                                failed_fix_code=current_candidate,
+                                error_type=err_type,
+                                error_message=err_msg
+                            )
+                        except Exception:
+                            refined = None
+
+                    if not refined or not refined.strip():
+                        new_ast_ctx = self.ast_extractor.analyze_error_context(test_error)
+                        refined = self._synthesize_fixed_code(current_candidate, test_error, new_ast_ctx)
+
                 if refined and refined.strip() and refined.strip() != current_candidate.strip():
                     current_candidate = refined.strip()
+                    errors_log[-1]["after_line"] = self._get_line_safe(current_candidate, err_line)
                 else:
-                    # Could not produce a distinct alternative fix
+                    errors_log[-1]["status"] = "Remaining"
                     break
 
+        if errors_log and errors_log[-1].get("status") == "Fixing":
+            errors_log[-1]["status"] = "Remaining"
+        self._last_errors_resolved = errors_log
         return current_candidate, False, attempts

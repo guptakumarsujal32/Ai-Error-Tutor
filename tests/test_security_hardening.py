@@ -27,15 +27,15 @@ class TestSecurityHardening(unittest.TestCase):
         self.tutor = AIErrorTutor(use_ai=False)
 
     def test_input_size_limit_blocked(self):
-        """Code exceeding 10,000 characters is rejected immediately."""
-        massive_code = "x = 1\n" + ("# filler comment line\n" * 500)
+        """Code exceeding 5,000 lines is rejected immediately."""
+        massive_code = "x = 1\n" + ("# filler comment line\n" * 5005)
         massive_code += "x = 2"
-        self.assertGreater(len(massive_code), 10000)
+        self.assertGreater(len(massive_code.splitlines()), 5000)
 
         success, err = self.capturer.execute_code(massive_code)
         self.assertFalse(success)
         self.assertEqual(err['error_type'], 'SecurityError')
-        self.assertIn('10000', err['message'])
+        self.assertIn('5000', err['message'])
 
         # Pipeline test
         res = self.tutor.analyze_code(massive_code)
